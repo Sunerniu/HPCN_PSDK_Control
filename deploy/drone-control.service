@@ -1,0 +1,16 @@
+[Unit]
+Description=HPCN DJI PSDK Control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hpcn
+Group=hpcn
+WorkingDirectory=/home/hpcn/Desktop/PSDK/psdk-3.14.1-fc30/build/bin
+ExecStart=/home/hpcn/Desktop/PSDK/psdk-3.14.1-fc30/start_drone.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
