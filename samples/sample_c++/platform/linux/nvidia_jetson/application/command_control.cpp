@@ -234,6 +234,18 @@ T_DjiReturnCode CommandControl_StopNavigation(void) {
   return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
 
+T_DjiReturnCode CommandControl_StopNavigationOnly(void) {
+  std::lock_guard<std::mutex> lock(s_cmdMutex);
+
+  if (s_navStatus != NAV_STATUS_RUNNING) {
+    return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+  }
+
+  s_navStatus = NAV_STATUS_STOPPED;
+  USER_LOG_INFO("Navigation stopped without hover command.");
+  return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+}
+
 T_DjiReturnCode CommandControl_ResumeNavigation(void) {
   std::lock_guard<std::mutex> lock(s_cmdMutex);
 

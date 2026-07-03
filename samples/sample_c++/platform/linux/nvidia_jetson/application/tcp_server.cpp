@@ -226,9 +226,9 @@ static void *ServerThreadEntry(void *arg) {
                 DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS &&
             navState.isNavigating) {
           USER_LOG_WARN(
-              "TCP disconnect timeout (>%dms), auto-pausing navigation!",
+              "TCP disconnect timeout (>%dms), sending navigation stop!",
               TCP_SERVER_DISCONNECT_TIMEOUT_MS);
-          CommandControl_StopNavigation();
+          CommandControl_StopNavigationOnly();
         }
         s_disconnectTimeoutTriggered = true;
       }

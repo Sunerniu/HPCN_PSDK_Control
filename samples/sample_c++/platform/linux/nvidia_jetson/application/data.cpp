@@ -10,6 +10,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "data.hpp"
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -18,6 +19,9 @@
 
 /* Private constants ---------------------------------------------------------*/
 #define RAD_TO_DEG 57.295779513082320876798154814105f
+
+/* Private variables ---------------------------------------------------------*/
+static std::atomic<bool> s_hasLoggedNoGlobalPosition(false);
 
 /* Private functions declaration ---------------------------------------------*/
 static void QuaternionToEuler(const T_DjiFcSubscriptionQuaternion *q,
@@ -28,6 +32,8 @@ static bool IsValidGlobalCoordinate(dji_f64_t latitude, dji_f64_t longitude);
 /* Exported functions definition ---------------------------------------------*/
 T_DjiReturnCode DataSubscriber_Init(void) {
   T_DjiReturnCode returnCode;
+
+  s_hasLoggedNoGlobalPosition.store(false);
 
   returnCode = DjiFcSubscription_Init();
   if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
@@ -42,6 +48,8 @@ T_DjiReturnCode DataSubscriber_Init(void) {
 
 T_DjiReturnCode DataSubscriber_DeInit(void) {
   T_DjiReturnCode returnCode;
+
+  s_hasLoggedNoGlobalPosition.store(false);
 
   returnCode = DjiFcSubscription_DeInit();
   if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
@@ -296,8 +304,11 @@ T_DjiReturnCode DataSubscriber_GetDroneStatus(T_DroneStatus *status) {
     status->altitude = (dji_f32_t)status->gpsPosition.z / 1000.0f;
     status->positionSource = DRONE_POSITION_SOURCE_GPS;
   } else {
-    USER_LOG_WARN("No valid global position source available. RTK info=%u, GPS fix=%.0f",
-                  status->rtkPositionInfo, status->gpsDetails.fixState);
+    bool expected = false;
+    if (s_hasLoggedNoGlobalPosition.compare_exchange_strong(expected, true)) {
+      USER_LOG_WARN("No valid global position source available. RTK info=%u, GPS fix=%.0f",
+                    status->rtkPositionInfo, status->gpsDetails.fixState);
+    }
     return DJI_ERROR_SYSTEM_MODULE_CODE_SYSTEM_ERROR;
   }
 

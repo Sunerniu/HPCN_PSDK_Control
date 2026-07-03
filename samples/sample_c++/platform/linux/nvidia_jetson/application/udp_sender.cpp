@@ -28,6 +28,7 @@
 /* Private constants ---------------------------------------------------------*/
 #define UDP_BUFFER_SIZE 4096
 #define UDP_STATUS_THREAD_STACK_SIZE 2048
+#define UDP_SEND_LOG_INTERVAL_MS 100000000
 
 /* Private variables ---------------------------------------------------------*/
 static int s_udpSocket = -1;
@@ -40,6 +41,7 @@ static std::atomic<bool> s_statusThreadRunning(false);
 static std::atomic<uint32_t> s_importantIntervalMs(
     UDP_IMPORTANT_SEND_INTERVAL_MS);
 static std::atomic<uint32_t> s_fullIntervalMs(UDP_FULL_SEND_INTERVAL_MS);
+static std::chrono::steady_clock::time_point s_lastSendLogTime;
 
 /* Private functions declaration ---------------------------------------------*/
 static T_DjiReturnCode ValidateSendRates(uint32_t importantIntervalMs,
@@ -51,13 +53,13 @@ static int FormatImportantDroneStatusToJson(const T_DroneStatus *status,
 static int FormatFullDroneStatusToJson(const T_DroneStatus *status,
                                        const T_NavState *navState,
                                        char *buffer, size_t bufferSize);
+
 static int FormatGpsRtkJsonBlock(const T_DroneStatus *status, char *buffer,
                                  size_t bufferSize);
 static bool IsValidGlobalCoordinateLocal(dji_f64_t latitude,
                                          dji_f64_t longitude);
 static bool IsGpsPositionValid(const T_DroneStatus *status);
 static bool IsRtkPositionValid(const T_DroneStatus *status);
-
 /* Exported functions definition ---------------------------------------------*/
 T_DjiReturnCode UdpSender_Init(const char *targetIp, uint16_t targetPort) {
   if (targetIp == NULL || targetPort == 0) {
@@ -67,6 +69,8 @@ T_DjiReturnCode UdpSender_Init(const char *targetIp, uint16_t targetPort) {
 
   s_importantIntervalMs.store(UDP_IMPORTANT_SEND_INTERVAL_MS);
   s_fullIntervalMs.store(UDP_FULL_SEND_INTERVAL_MS);
+  s_lastSendLogTime = std::chrono::steady_clock::now() -
+                      std::chrono::milliseconds(UDP_SEND_LOG_INTERVAL_MS);
 
   // 创建UDP socket
   s_udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -306,6 +310,15 @@ static T_DjiReturnCode SendJsonBuffer(const char *buffer, int jsonLen) {
     return DJI_ERROR_SYSTEM_MODULE_CODE_SYSTEM_ERROR;
   }
 
+  auto now = std::chrono::steady_clock::now();
+  if (std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - s_lastSendLogTime)
+          .count() >= UDP_SEND_LOG_INTERVAL_MS) {
+    s_lastSendLogTime = now;
+    USER_LOG_INFO("UDP sent %zd bytes to %s:%u, payload: %s", sentBytes,
+                  s_targetIp, s_targetPort, buffer);
+  }
+
   return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
 
@@ -368,6 +381,7 @@ static int FormatGpsRtkJsonBlock(const T_DroneStatus *status, char *buffer,
   dji_f64_t gpsLatitude;
   dji_f64_t gpsLongitude;
   dji_f64_t gpsAltitude;
+  int len;
 
   if (status == NULL || buffer == NULL || bufferSize == 0) {
     return -1;
@@ -379,31 +393,34 @@ static int FormatGpsRtkJsonBlock(const T_DroneStatus *status, char *buffer,
   gpsLongitude = (dji_f64_t)status->gpsPosition.x / 10000000.0;
   gpsAltitude = (dji_f64_t)status->gpsPosition.z / 1000.0;
 
-  return snprintf(buffer, bufferSize,
-                  "\"gps\":{"
-                  "\"valid\":%s,"
-                  "\"lat\":%.7f,"
-                  "\"lon\":%.7f,"
-                  "\"alt\":%.2f,"
-                  "\"fix_state\":%.0f,"
-                  "\"position_time\":{\"ms\":%u,\"us\":%u},"
-                  "\"details_time\":{\"ms\":%u,\"us\":%u}"
-                  "},"
-                  "\"rtk\":{"
+  len = snprintf(buffer, bufferSize,
+                 "\"gps\":{"
+                 "\"valid\":%s,"
+                 "\"lat\":%.7f,"
+                 "\"lon\":%.7f,"
+                 "\"alt\":%.2f,"
+                 "\"fix_state\":%.0f,"
+                 "\"position_time\":{\"ms\":%u,\"us\":%u},"
+                 "\"details_time\":{\"ms\":%u,\"us\":%u}",
+                 gpsValid ? "true" : "false", gpsLatitude, gpsLongitude,
+                 gpsAltitude, status->gpsDetails.fixState,
+                 (unsigned int)status->gpsPositionTimestamp.millisecond,
+                 (unsigned int)status->gpsPositionTimestamp.microsecond,
+                 (unsigned int)status->gpsDetailsTimestamp.millisecond,
+                 (unsigned int)status->gpsDetailsTimestamp.microsecond);
+  if (len <= 0 || (size_t)len >= bufferSize) {
+    return -1;
+  }
+
+  len += snprintf(buffer + len, bufferSize - len,
+                  "},\"rtk\":{"
                   "\"valid\":%s,"
                   "\"lat\":%.7f,"
                   "\"lon\":%.7f,"
                   "\"alt\":%.2f,"
                   "\"position_info\":%u,"
                   "\"position_time\":{\"ms\":%u,\"us\":%u},"
-                  "\"info_time\":{\"ms\":%u,\"us\":%u}"
-                  "}",
-                  gpsValid ? "true" : "false", gpsLatitude, gpsLongitude,
-                  gpsAltitude, status->gpsDetails.fixState,
-                  (unsigned int)status->gpsPositionTimestamp.millisecond,
-                  (unsigned int)status->gpsPositionTimestamp.microsecond,
-                  (unsigned int)status->gpsDetailsTimestamp.millisecond,
-                  (unsigned int)status->gpsDetailsTimestamp.microsecond,
+                  "\"info_time\":{\"ms\":%u,\"us\":%u}",
                   rtkValid ? "true" : "false", status->rtkPosition.latitude,
                   status->rtkPosition.longitude, status->rtkPosition.hfsl,
                   (unsigned int)status->rtkPositionInfo,
@@ -411,6 +428,13 @@ static int FormatGpsRtkJsonBlock(const T_DroneStatus *status, char *buffer,
                   (unsigned int)status->rtkPositionTimestamp.microsecond,
                   (unsigned int)status->rtkInfoTimestamp.millisecond,
                   (unsigned int)status->rtkInfoTimestamp.microsecond);
+  if (len <= 0 || (size_t)len >= bufferSize) {
+    return -1;
+  }
+
+  buffer[len++] = '}';
+  buffer[len] = '\0';
+  return len;
 }
 
 static int FormatImportantDroneStatusToJson(const T_DroneStatus *status,
@@ -469,19 +493,6 @@ static int FormatFullDroneStatusToJson(const T_DroneStatus *status,
       "\"roll\":%.4f,"
       "\"yaw\":%.4f"
       "},"
-      "\"position\":{"
-      "\"lat\":%.7f,"
-      "\"lon\":%.7f,"
-      "\"alt_abs\":%.2f,"
-      "\"source\":\"%s\","
-      "\"available\":%s"
-      "},"
-      "\"position_fused\":{"
-      "\"lat\":%.7f,"
-      "\"lon\":%.7f,"
-      "\"alt\":%.2f,"
-      "\"satellites\":%u"
-      "},"
       "\"velocity\":{"
       "\"vx\":%.3f,"
       "\"vy\":%.3f,"
@@ -509,16 +520,8 @@ static int FormatFullDroneStatusToJson(const T_DroneStatus *status,
       "\"yaw\":%.2f"
       "},"
       "\"position_source\":\"%s\",",
-      (long)now, status->pitch, status->roll, status->yaw, status->latitude,
-      status->longitude, status->altitude,
-      DataSubscriber_GetPositionSourceString(status->positionSource),
-      status->positionSource == DRONE_POSITION_SOURCE_UNAVAILABLE ? "false"
-                                                                  : "true",
-      status->positionFused.latitude * 180.0 / 3.14159265358979,
-      status->positionFused.longitude * 180.0 / 3.14159265358979,
-      status->positionFused.altitude,
-      status->positionFused.visibleSatelliteNumber, status->velocity.data.x,
-      status->velocity.data.y, status->velocity.data.z,
+      (long)now, status->pitch, status->roll, status->yaw,
+      status->velocity.data.x, status->velocity.data.y, status->velocity.data.z,
       status->batteryInfo.voltage, status->batteryInfo.current,
       status->batteryInfo.percentage, status->batteryInfo.capacity,
       status->flightStatus, status->displayMode, status->heightFusion,

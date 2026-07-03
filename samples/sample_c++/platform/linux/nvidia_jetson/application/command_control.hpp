@@ -176,6 +176,12 @@ T_DjiReturnCode CommandControl_StartNavigation(void);
 T_DjiReturnCode CommandControl_StopNavigation(void);
 
 /**
+ * @brief 仅暂停导航状态，不额外发送悬停速度指令
+ * @return 执行结果
+ */
+T_DjiReturnCode CommandControl_StopNavigationOnly(void);
+
+/**
  * @brief 恢复导航
  * @return 执行结果
  */

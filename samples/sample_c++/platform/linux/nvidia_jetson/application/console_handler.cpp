@@ -40,7 +40,7 @@ static bool ParseWaypointInput(const std::string &input, T_Waypoint *wp);
 static bool ValidateWaypoint(const T_Waypoint *wp, E_CommandSource source);
 
 /* Private constants ---------------------------------------------------------*/
-#define WAYPOINT_MAX_DISTANCE_M 5000.0 // 最大允许距离 (5000米)
+#define WAYPOINT_MAX_DISTANCE_M 2000.0 // 最大允许距离 (2000米)
 #define WAYPOINT_MAX_ALTITUDE_M 1500.0  // 最大允许高度 (500米)
 #define WAYPOINT_MIN_ALTITUDE_M 0.0    // 最小允许高度 (0米)
 #define EARTH_RADIUS_M 6371000.0       // 地球半径 (米)
@@ -437,6 +437,8 @@ static const char *GetSourceString(E_CommandSource source) {
  * @return true = 合理, false = 不合理
  */
 static bool ValidateWaypoint(const T_Waypoint *wp, E_CommandSource source) {
+  (void)source;
+
   if (wp == NULL) {
     return false;
   }
@@ -466,32 +468,33 @@ static bool ValidateWaypoint(const T_Waypoint *wp, E_CommandSource source) {
     }
   }
 
-  // 3. 与当前位置距离检查 (仅对TCP命令严格检查，防止网络异常导致离谱位置)
-  if (source == CMD_SOURCE_TCP) {
-    T_DroneStatus status;
-    if (DataSubscriber_GetDroneStatus(&status) ==
-        DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
-      // Haversine公式计算距离
-      double lat1 = status.latitude * M_PI / 180.0;
-      double lon1 = status.longitude * M_PI / 180.0;
-      double lat2 = wp->latitude * M_PI / 180.0;
-      double lon2 = wp->longitude * M_PI / 180.0;
+  // 3. 与当前位置距离检查，防止误下发过远航点
+  T_DroneStatus status;
+  if (DataSubscriber_GetDroneStatus(&status) !=
+      DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+    USER_LOG_WARN("Waypoint validation failed: current global position unavailable");
+    return false;
+  }
 
-      double dlat = lat2 - lat1;
-      double dlon = lon2 - lon1;
+  // Haversine公式计算距离
+  double lat1 = status.latitude * M_PI / 180.0;
+  double lon1 = status.longitude * M_PI / 180.0;
+  double lat2 = wp->latitude * M_PI / 180.0;
+  double lon2 = wp->longitude * M_PI / 180.0;
 
-      double a = sin(dlat / 2) * sin(dlat / 2) +
-                 cos(lat1) * cos(lat2) * sin(dlon / 2) * sin(dlon / 2);
-      double c = 2 * atan2(sqrt(a), sqrt(1 - a));
-      double distance = EARTH_RADIUS_M * c;
+  double dlat = lat2 - lat1;
+  double dlon = lon2 - lon1;
 
-      if (distance > WAYPOINT_MAX_DISTANCE_M) {
-        USER_LOG_WARN(
-            "Waypoint validation failed: distance %.1fm exceeds max %.1fm",
-            distance, WAYPOINT_MAX_DISTANCE_M);
-        return false;
-      }
-    }
+  double a = sin(dlat / 2) * sin(dlat / 2) +
+             cos(lat1) * cos(lat2) * sin(dlon / 2) * sin(dlon / 2);
+  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  double distance = EARTH_RADIUS_M * c;
+
+  if (distance > WAYPOINT_MAX_DISTANCE_M) {
+    USER_LOG_WARN(
+        "Waypoint validation failed: distance %.1fm exceeds max %.1fm",
+        distance, WAYPOINT_MAX_DISTANCE_M);
+    return false;
   }
 
   return true;

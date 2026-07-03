@@ -25,6 +25,8 @@
 
 /* Private constants -------------------------------------------------*/
 #define UDP_RECEIVER_THREAD_STACK_SIZE 2048
+#define UDP_HEARTBEAT_STOP_TIMEOUT_SEC 10
+#define UDP_HEARTBEAT_GOHOME_TIMEOUT_SEC 20
 
 /* Private variables -------------------------------------------------*/
 static int s_recvSocket = -1;
@@ -168,9 +170,10 @@ static void *ReceiverThreadEntry(void *arg) {
   // Heartbeat tracking variables
   auto lastHeartbeatTime = std::chrono::steady_clock::now();
   int missedHeartbeats = 0;
-  bool hasHovered = false;
+  bool hasStopped = false;
   bool hasGoHome = false;
   bool heartbeatReceivedEver = false;
+  bool heartbeatLostLogged = false;
 
   // Set receive timeout
   struct timeval tv;
@@ -190,11 +193,17 @@ static void *ReceiverThreadEntry(void *arg) {
 
       // Check if it's a JSON heartbeat packet
       if (buffer[0] == '{' && strstr((char *)buffer, "\"heartbeat\"") != NULL) {
+        if (!heartbeatReceivedEver) {
+          USER_LOG_INFO("UDP heartbeat detected for the first time");
+        } else if (heartbeatLostLogged) {
+          USER_LOG_INFO("UDP heartbeat restored");
+        }
         lastHeartbeatTime = now;
         missedHeartbeats = 0;
-        hasHovered = false;
+        hasStopped = false;
         hasGoHome = false;
         heartbeatReceivedEver = true;
+        heartbeatLostLogged = false;
         // Successfully processed heartbeat, continue to next loop iteration
         continue;
       }
@@ -230,13 +239,21 @@ static void *ReceiverThreadEntry(void *arg) {
       auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHeartbeatTime).count();
       missedHeartbeats = elapsedMs / 1000;
 
-      if (missedHeartbeats >= 10 && !hasHovered) {
-        USER_LOG_WARN("UDP missed 10 heartbeats! Triggering Hover...");
-        CommandControl_Hover();
-        hasHovered = true;
+      if (elapsedMs >= UDP_HEARTBEAT_STOP_TIMEOUT_SEC * 1000 && !heartbeatLostLogged) {
+        USER_LOG_WARN("UDP heartbeat not detected for %.1f seconds",
+                      elapsedMs / 1000.0);
+        heartbeatLostLogged = true;
       }
-      if (missedHeartbeats >= 30 && !hasGoHome) {
-        USER_LOG_WARN("UDP missed 30 heartbeats! Triggering GoHome...");
+
+      if (missedHeartbeats >= UDP_HEARTBEAT_STOP_TIMEOUT_SEC && !hasStopped) {
+        USER_LOG_ERROR("UDP heartbeat missing over %d seconds, triggering navigation stop",
+                       UDP_HEARTBEAT_STOP_TIMEOUT_SEC);
+        CommandControl_StopNavigationOnly();
+        hasStopped = true;
+      }
+      if (missedHeartbeats >= UDP_HEARTBEAT_GOHOME_TIMEOUT_SEC && !hasGoHome) {
+        USER_LOG_ERROR("UDP heartbeat missing over %d seconds, triggering GoHome",
+                       UDP_HEARTBEAT_GOHOME_TIMEOUT_SEC);
         CommandControl_GoHome();
         hasGoHome = true;
       }

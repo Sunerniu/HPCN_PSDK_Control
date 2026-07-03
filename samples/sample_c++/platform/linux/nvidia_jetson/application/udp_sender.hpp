@@ -21,7 +21,7 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 #define UDP_DEFAULT_PORT 14550
-#define UDP_DEFAULT_IP "100.124.151.60" // 默认目标IP (主机)
+#define UDP_DEFAULT_IP "192.168.0.1" // 默认目标IP (主机)
 #define UDP_IMPORTANT_SEND_INTERVAL_MS 100
 #define UDP_FULL_SEND_INTERVAL_MS 5000
 #define UDP_SEND_INTERVAL_MS UDP_IMPORTANT_SEND_INTERVAL_MS
