@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 #include "dji_platform.h"
 

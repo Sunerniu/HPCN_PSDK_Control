@@ -10,6 +10,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "udp_sender.hpp"
+#include "time_sync_bridge.hpp"
 #include "command_control.hpp"
 #include "data.hpp"
 #include <arpa/inet.h>
@@ -53,6 +54,28 @@ static int FormatImportantDroneStatusToJson(const T_DroneStatus *status,
 static int FormatFullDroneStatusToJson(const T_DroneStatus *status,
                                        const T_NavState *navState,
                                        char *buffer, size_t bufferSize);
+static void AppendRealTimeJson(const char *fieldName,
+                               const T_DjiDataTimestamp *timestamp,
+                               char *buffer, size_t bufferSize) {
+  T_TimeSyncBridgeRealTime realTime;
+  char isoTime[40];
+
+  if (fieldName == NULL || timestamp == NULL || buffer == NULL ||
+      bufferSize == 0) {
+    return;
+  }
+
+  if (TimeSyncBridge_ConvertDataTimestamp(timestamp, &realTime) ==
+      DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS && realTime.valid) {
+    TimeSyncBridge_FormatIso8601(&realTime, isoTime, sizeof(isoTime));
+    snprintf(buffer, bufferSize,
+             ",\"%s\":{\"valid\":true,\"iso8601\":\"%s\",\"epoch_us\":%llu}",
+             fieldName, isoTime, (unsigned long long)realTime.epochUs);
+  } else {
+    snprintf(buffer, bufferSize, ",\"%s\":{\"valid\":false}",
+             fieldName);
+  }
+}
 
 static int FormatGpsRtkJsonBlock(const T_DroneStatus *status, char *buffer,
                                  size_t bufferSize);
@@ -412,6 +435,13 @@ static int FormatGpsRtkJsonBlock(const T_DroneStatus *status, char *buffer,
     return -1;
   }
 
+  AppendRealTimeJson("position_real_time", &status->gpsPositionTimestamp,
+                     buffer + len, bufferSize - len);
+  len += strlen(buffer + len);
+  if ((size_t)len >= bufferSize) {
+    return -1;
+  }
+
   len += snprintf(buffer + len, bufferSize - len,
                   "},\"rtk\":{"
                   "\"valid\":%s,"
@@ -429,6 +459,13 @@ static int FormatGpsRtkJsonBlock(const T_DroneStatus *status, char *buffer,
                   (unsigned int)status->rtkInfoTimestamp.millisecond,
                   (unsigned int)status->rtkInfoTimestamp.microsecond);
   if (len <= 0 || (size_t)len >= bufferSize) {
+    return -1;
+  }
+
+  AppendRealTimeJson("position_real_time", &status->rtkPositionTimestamp,
+                     buffer + len, bufferSize - len);
+  len += strlen(buffer + len);
+  if ((size_t)len >= bufferSize - 1) {
     return -1;
   }
 

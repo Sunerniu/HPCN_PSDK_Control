@@ -31,8 +31,6 @@
 /* Private types -------------------------------------------------------------*/
 
 /* Private values -------------------------------------------------------------*/
-static uint32_t s_localTimeMsOffset = 0;
-static uint64_t s_localTimeUsOffset = 0;
 
 /* Private functions declaration ---------------------------------------------*/
 
@@ -296,32 +294,24 @@ T_DjiReturnCode Osal_SemaphorePost(T_DjiSemaHandle semaphore)
  */
 T_DjiReturnCode Osal_GetTimeMs(uint32_t *ms)
 {
-    struct timeval time;
+    struct timespec time;
+    uint64_t currentMs;
 
-    gettimeofday(&time, NULL);
-    *ms = (time.tv_sec * 1000 + time.tv_usec / 1000);
-
-    if (s_localTimeMsOffset == 0) {
-        s_localTimeMsOffset = *ms;
-    } else {
-        *ms = *ms - s_localTimeMsOffset;
-    }
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    currentMs = (uint64_t) time.tv_sec * 1000ULL + (uint64_t) time.tv_nsec / 1000000ULL;
+    *ms = (uint32_t) currentMs;
 
     return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
 
 T_DjiReturnCode Osal_GetTimeUs(uint64_t *us)
 {
-    struct timeval time;
+    struct timespec time;
+    uint64_t currentUs;
 
-    gettimeofday(&time, NULL);
-    *us = (time.tv_sec * 1000000 + time.tv_usec);
-
-    if (s_localTimeUsOffset == 0) {
-        s_localTimeUsOffset = *us;
-    } else {
-        *us = *us - s_localTimeUsOffset;
-    }
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    currentUs = (uint64_t) time.tv_sec * 1000000ULL + (uint64_t) time.tv_nsec / 1000ULL;
+    *us = currentUs;
 
     return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }

@@ -18,6 +18,7 @@
 #include "data.hpp"
 #include "gimbal_control.hpp"
 #include "tcp_server.hpp"
+#include "time_sync_bridge.hpp"
 #include "udp_receiver.hpp"
 #include "udp_sender.hpp"
 
@@ -58,11 +59,21 @@ int main(int argc, char **argv) {
   std::cout << "  DJI Payload SDK " << std::endl;
   std::cout << "============================================\n" << std::endl;
 
-  // 1. 初始化数据订阅模块
+  // 1. 初始化 PPS 时间同步模块
+  std::cout << "[INFO] 初始化 PPS 时间同步模块..." << std::endl;
+  returnCode = TimeSyncBridge_Init();
+  if (returnCode == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+    std::cout << "[OK] PPS 时间同步模块初始化成功" << std::endl;
+  } else {
+    std::cerr << "[WARN] PPS 时间同步不可用，请检查 PPS_GPIOCHIP 和 PPS_GPIO_LINE 配置" << std::endl;
+  }
+
+  // 2. 初始化数据订阅模块
   std::cout << "[INFO] 初始化数据订阅模块..." << std::endl;
   returnCode = DataSubscriber_Init();
   if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
     std::cerr << "[ERROR] 数据订阅模块初始化失败" << std::endl;
+    TimeSyncBridge_DeInit();
     return -1;
   }
   DataSubscriber_SubscribeTopics();
@@ -134,6 +145,7 @@ int main(int argc, char **argv) {
   }
   GimbalControl_DeInit();
   DataSubscriber_DeInit();
+  TimeSyncBridge_DeInit();
 
   std::cout << "[OK] 程序已退出" << std::endl;
   return 0;
