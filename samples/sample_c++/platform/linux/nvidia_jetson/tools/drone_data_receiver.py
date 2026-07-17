@@ -57,6 +57,63 @@ def get_display_mode_string(mode: int) -> str:
     return mode_map.get(mode, f"未知模式({mode})")
 
 
+def format_relative_time(timestamp: dict) -> str:
+    """格式化 PSDK 订阅数据的相对时间戳"""
+    if not isinstance(timestamp, dict):
+        return "无数据"
+
+    milliseconds = timestamp.get('ms')
+    microseconds = timestamp.get('us')
+    if milliseconds is None or microseconds is None:
+        return "无数据"
+
+    return f"{milliseconds} ms + {microseconds} us"
+
+
+def format_real_time(real_time: dict) -> str:
+    """格式化 PPS 映射后的 UTC 现实时间"""
+    if not isinstance(real_time, dict) or not real_time.get('valid', False):
+        return "未同步（等待 PPS/时间映射）"
+
+    iso8601 = real_time.get('iso8601', '未提供')
+    epoch_us = real_time.get('epoch_us')
+    if epoch_us is None:
+        return iso8601
+
+    return f"{iso8601}  (epoch_us: {epoch_us})"
+
+
+def append_position_block(lines: list, name: str, position: dict) -> None:
+    """输出 GPS 或 RTK 位置及时间同步状态"""
+    if not isinstance(position, dict):
+        return
+
+    valid = bool(position.get('valid', False))
+    lines.append(f"\n【{name}位置】")
+    lines.append(f"  位置有效: {'是' if valid else '否'}")
+    lines.append(f"  纬度: {position.get('lat', 0):.7f}°")
+    lines.append(f"  经度: {position.get('lon', 0):.7f}°")
+    lines.append(f"  高度: {position.get('alt', 0):.2f} m")
+
+    if name == 'GPS':
+        lines.append(f"  Fix State: {position.get('fix_state', '未知')}")
+        details_time = position.get('details_time')
+        if details_time is not None:
+            lines.append(f"  详情相对时间: {format_relative_time(details_time)}")
+    elif name == 'RTK':
+        lines.append(f"  Position Info: {position.get('position_info', '未知')}")
+        info_time = position.get('info_time')
+        if info_time is not None:
+            lines.append(f"  状态相对时间: {format_relative_time(info_time)}")
+
+    lines.append(
+        f"  位置相对时间: {format_relative_time(position.get('position_time'))}"
+    )
+    lines.append(
+        f"  位置现实时间: {format_real_time(position.get('position_real_time'))}"
+    )
+
+
 def format_drone_status(data: dict) -> str:
     """格式化无人机状态为可读字符串"""
     lines = []
@@ -72,10 +129,18 @@ def format_drone_status(data: dict) -> str:
         lines.append(f"  横滚角 (Roll):  {att.get('roll', 0):.2f}°")
         lines.append(f"  偏航角 (Yaw):   {att.get('yaw', 0):.2f}°")
     
-    # 位置信息
+    # PPS 版本的 GPS/RTK 位置与时间信息
+    position_source = data.get('position_source')
+    if position_source is not None:
+        lines.append(f"\n  当前位置源: {position_source}")
+
+    append_position_block(lines, 'GPS', data.get('gps'))
+    append_position_block(lines, 'RTK', data.get('rtk'))
+
+    # 兼容旧版 position 字段
     if 'position' in data:
         pos = data['position']
-        lines.append("\n【GPS位置】")
+        lines.append("\n【旧版融合位置】")
         lines.append(f"  纬度: {pos.get('lat', 0):.7f}°")
         lines.append(f"  经度: {pos.get('lon', 0):.7f}°")
         lines.append(f"  高度: {pos.get('alt', 0):.2f} m")
