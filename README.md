@@ -1,8 +1,20 @@
 # DJI Payload SDK (PSDK)
 
 ![](https://img.shields.io/badge/version-V3.14.1-red.svg)
+![](https://img.shields.io/badge/HPCN_FC30-v0.3.0-blue.svg)
 ![](https://img.shields.io/badge/platform-linux_|_rtos-yellow.svg)
 ![](https://img.shields.io/badge/license-MIT-purple.svg)
+
+## HPCN FC30 Control v0.3.0
+
+This FC30 application release adds:
+
+- `heightto` absolute-altitude control at a fixed maximum vertical speed of 1.5 m/s.
+- Configurable outbound UDP target IP and UART device through systemd environment settings.
+- A 200-second UDP heartbeat timeout before automatic GoHome.
+- Correct TCP partial-packet reassembly for the 30-byte control protocol.
+- Immediate hover when active navigation is stopped by a TCP or UDP link timeout.
+- Persistent TCP/UDP heartbeat and command-line test tools.
 
 ## What is the DJI Payload SDK?
 

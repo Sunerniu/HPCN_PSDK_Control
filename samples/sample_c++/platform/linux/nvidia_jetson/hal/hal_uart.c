@@ -48,6 +48,8 @@ T_DjiReturnCode HalUart_Init(E_DjiHalUartNum uartNum, uint32_t baudRate, T_DjiUa
     struct flock lock;
     T_DjiReturnCode returnCode = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
     char uartName[UART_DEV_NAME_STR_SIZE];
+    const char *uart0Device = getenv("DJI_UART0_DEVICE");
+    const char *uart1Device = getenv("DJI_UART1_DEVICE");
     char systemCmd[DJI_SYSTEM_CMD_STR_MAX_SIZE];
     char *ret = NULL;
     char lineBuf[DJI_SYSTEM_RESULT_STR_MAX_SIZE] = {0};
@@ -59,9 +61,15 @@ T_DjiReturnCode HalUart_Init(E_DjiHalUartNum uartNum, uint32_t baudRate, T_DjiUa
     }
 
     if (uartNum == DJI_HAL_UART_NUM_0) {
-        strcpy(uartName, LINUX_UART_DEV1);
+        snprintf(uartName, sizeof(uartName), "%s",
+                 uart0Device != NULL && uart0Device[0] != '\0'
+                     ? uart0Device
+                     : LINUX_UART_DEV1);
     } else if (uartNum == DJI_HAL_UART_NUM_1) {
-        strcpy(uartName, LINUX_UART_DEV2);
+        snprintf(uartName, sizeof(uartName), "%s",
+                 uart1Device != NULL && uart1Device[0] != '\0'
+                     ? uart1Device
+                     : LINUX_UART_DEV2);
     } else {
         goto free_uart_handle;
     }

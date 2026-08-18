@@ -29,10 +29,19 @@
 #define ARRIVAL_THRESHOLD_Z_M 0.3     // Vertical arrival threshold
 #define YAW_ARRIVAL_THRESHOLD_DEG 5.0 // Yaw arrival threshold
 #define NAV_LOOP_INTERVAL_MS 50       // 20Hz Loop
+#define DEFAULT_VERTICAL_SPEED_MPS 1.5f
+#define MIN_ABSOLUTE_ALTITUDE_M 0.0f
+#define MAX_ABSOLUTE_ALTITUDE_M 1500.0f
 
 /* Static Variables ----------------------------------------------------------*/
 static std::mutex s_cmdMutex;
+// Lock order is always joystick-send mutex first, then command-state mutex.
+// This guarantees that a cancel/hover command is the final joystick command
+// for the invalidated navigation generation.
+static std::mutex s_joystickSendMutex;
 static std::atomic<bool> s_stopThread(false);
+// Protected by s_cmdMutex. Incremented whenever navigation control changes.
+static uint64_t s_controlGeneration = 0;
 static std::thread s_navThread;
 static std::deque<T_Waypoint> s_waypointQueue;
 static T_Waypoint s_currentWaypoint;
@@ -40,10 +49,24 @@ static bool s_hasActiveWaypoint = false;
 static E_NavigationStatus s_navStatus = NAV_STATUS_IDLE;
 static T_DjiReturnCode s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 static T_DjiOsalHandler *s_osalHandler = nullptr;
+static bool s_heightControlActive = false;
+static dji_f32_t s_heightTargetAltitude = 0.0f;
+static dji_f32_t s_heightMaxVerticalSpeed = DEFAULT_VERTICAL_SPEED_MPS;
 
 /* Private Functions Declaration ---------------------------------------------*/
 static void NavigationThreadFunc();
 static void SleepMs(uint32_t sleepMs);
+static void ClearHeightControlLocked();
+static T_DjiReturnCode
+ExecuteVelocityControlUnlocked(const T_VelocityCommand *cmd);
+static T_DjiReturnCode
+SendNavigationVelocityIfCurrent(const T_VelocityCommand *cmd,
+                                uint64_t expectedGeneration,
+                                bool requireHeightControl);
+static T_DjiReturnCode
+CompleteHeightControlIfCurrent(uint64_t expectedGeneration);
+static T_DjiReturnCode
+CompleteNavigationIfNoTargetCurrent(uint64_t expectedGeneration);
 
 /* Exported Functions Definition ---------------------------------------------*/
 
@@ -84,6 +107,8 @@ T_DjiReturnCode CommandControl_Init(const T_CommandControlConfig *config) {
     s_waypointQueue.clear();
     memset(&s_currentWaypoint, 0, sizeof(s_currentWaypoint));
     s_hasActiveWaypoint = false;
+    ClearHeightControlLocked();
+    s_controlGeneration = 0;
     s_navStatus = NAV_STATUS_IDLE;
     s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
   }
@@ -110,7 +135,57 @@ T_DjiReturnCode CommandControl_ReleaseJoystickAuthority(void) {
 }
 
 T_DjiReturnCode CommandControl_Takeoff(void) {
+  T_DjiReturnCode returnCode =
+      DjiFlightController_ObtainJoystickCtrlAuthority();
+  if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+    return returnCode;
+  }
   return DjiFlightController_StartTakeoff();
+}
+
+T_DjiReturnCode CommandControl_HeightTo(dji_f32_t targetAltitude) {
+  T_DjiReturnCode returnCode;
+
+  if (!std::isfinite(targetAltitude) ||
+      targetAltitude < MIN_ABSOLUTE_ALTITUDE_M ||
+      targetAltitude > MAX_ABSOLUTE_ALTITUDE_M) {
+    return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
+  }
+
+  T_DroneStatus currentStatus = {};
+  returnCode = DataSubscriber_GetDroneStatus(&currentStatus);
+  if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+    return returnCode;
+  }
+  if (currentStatus.flightStatus !=
+      DJI_FC_SUBSCRIPTION_FLIGHT_STATUS_IN_AIR) {
+    USER_LOG_ERROR("HeightTo rejected: aircraft is not in air");
+    return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
+  }
+
+  returnCode = DjiFlightController_ObtainJoystickCtrlAuthority();
+  if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+    return returnCode;
+  }
+
+  {
+    std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
+    std::lock_guard<std::mutex> lock(s_cmdMutex);
+    ++s_controlGeneration;
+    s_waypointQueue.clear();
+    memset(&s_currentWaypoint, 0, sizeof(s_currentWaypoint));
+    s_hasActiveWaypoint = false;
+    s_heightControlActive = true;
+    s_heightTargetAltitude = targetAltitude;
+    s_heightMaxVerticalSpeed = DEFAULT_VERTICAL_SPEED_MPS;
+    s_navStatus = NAV_STATUS_RUNNING;
+    s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+  }
+
+  USER_LOG_INFO(
+      "Height-only control started: target absolute altitude %.2f m, max speed %.2f m/s",
+      targetAltitude, DEFAULT_VERTICAL_SPEED_MPS);
+  return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
 
 T_DjiReturnCode CommandControl_Land(void) {
@@ -142,6 +217,12 @@ T_DjiReturnCode CommandControl_CancelGoHome(void) {
 
 T_DjiReturnCode
 CommandControl_ExecuteVelocityControl(const T_VelocityCommand *cmd) {
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
+  return ExecuteVelocityControlUnlocked(cmd);
+}
+
+static T_DjiReturnCode
+ExecuteVelocityControlUnlocked(const T_VelocityCommand *cmd) {
   if (cmd == nullptr) {
     return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
   }
@@ -178,7 +259,10 @@ T_DjiReturnCode CommandControl_PlansTo(const T_Waypoint *waypoint) {
   if (waypoint == nullptr)
     return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
 
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
   std::lock_guard<std::mutex> lock(s_cmdMutex);
+  ++s_controlGeneration;
+  ClearHeightControlLocked();
   s_waypointQueue.push_back(*waypoint);
   s_navStatus = NAV_STATUS_RUNNING;
   s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
@@ -191,7 +275,10 @@ T_DjiReturnCode CommandControl_ChangeTo(const T_Waypoint *waypoint) {
   if (waypoint == nullptr)
     return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
 
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
   std::lock_guard<std::mutex> lock(s_cmdMutex);
+  ++s_controlGeneration;
+  ClearHeightControlLocked();
   s_waypointQueue.clear();
   memset(&s_currentWaypoint, 0, sizeof(s_currentWaypoint));
   s_waypointQueue.push_back(*waypoint);
@@ -204,16 +291,19 @@ T_DjiReturnCode CommandControl_ChangeTo(const T_Waypoint *waypoint) {
 }
 
 T_DjiReturnCode CommandControl_StartNavigation(void) {
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
   std::lock_guard<std::mutex> lock(s_cmdMutex);
 
   if (s_navStatus == NAV_STATUS_RUNNING) {
     return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
   }
 
-  if (!s_hasActiveWaypoint && s_waypointQueue.empty()) {
+  if (!s_heightControlActive && !s_hasActiveWaypoint &&
+      s_waypointQueue.empty()) {
     return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE;
   }
 
+  ++s_controlGeneration;
   s_navStatus = NAV_STATUS_RUNNING;
   s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
   USER_LOG_INFO("Navigation started.");
@@ -221,32 +311,25 @@ T_DjiReturnCode CommandControl_StartNavigation(void) {
 }
 
 T_DjiReturnCode CommandControl_StopNavigation(void) {
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
   {
     std::lock_guard<std::mutex> lock(s_cmdMutex);
     if (s_navStatus != NAV_STATUS_RUNNING) {
       return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
     }
+    ++s_controlGeneration;
     s_navStatus = NAV_STATUS_STOPPED;
   }
 
-  CommandControl_Hover();
+  T_VelocityCommand hoverCommand = {};
+  T_DjiReturnCode returnCode =
+      ExecuteVelocityControlUnlocked(&hoverCommand);
   USER_LOG_INFO("Navigation paused.");
-  return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
-}
-
-T_DjiReturnCode CommandControl_StopNavigationOnly(void) {
-  std::lock_guard<std::mutex> lock(s_cmdMutex);
-
-  if (s_navStatus != NAV_STATUS_RUNNING) {
-    return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
-  }
-
-  s_navStatus = NAV_STATUS_STOPPED;
-  USER_LOG_INFO("Navigation stopped without hover command.");
-  return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+  return returnCode;
 }
 
 T_DjiReturnCode CommandControl_ResumeNavigation(void) {
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
   std::lock_guard<std::mutex> lock(s_cmdMutex);
 
   if (s_navStatus == NAV_STATUS_RUNNING) {
@@ -257,10 +340,12 @@ T_DjiReturnCode CommandControl_ResumeNavigation(void) {
     return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE;
   }
 
-  if (!s_hasActiveWaypoint && s_waypointQueue.empty()) {
+  if (!s_heightControlActive && !s_hasActiveWaypoint &&
+      s_waypointQueue.empty()) {
     return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE;
   }
 
+  ++s_controlGeneration;
   s_navStatus = NAV_STATUS_RUNNING;
   s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
   USER_LOG_INFO("Navigation resumed.");
@@ -268,18 +353,23 @@ T_DjiReturnCode CommandControl_ResumeNavigation(void) {
 }
 
 T_DjiReturnCode CommandControl_ClearNavigation(void) {
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
   {
     std::lock_guard<std::mutex> lock(s_cmdMutex);
+    ++s_controlGeneration;
     s_waypointQueue.clear();
     memset(&s_currentWaypoint, 0, sizeof(s_currentWaypoint));
     s_hasActiveWaypoint = false;
+    ClearHeightControlLocked();
     s_navStatus = NAV_STATUS_IDLE;
     s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
   }
 
-  CommandControl_Hover();
+  T_VelocityCommand hoverCommand = {};
+  T_DjiReturnCode returnCode =
+      ExecuteVelocityControlUnlocked(&hoverCommand);
   USER_LOG_INFO("Navigation cleared.");
-  return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+  return returnCode;
 }
 
 T_DjiReturnCode CommandControl_GetNavState(T_NavState *state) {
@@ -291,8 +381,11 @@ T_DjiReturnCode CommandControl_GetNavState(T_NavState *state) {
 
   state->status = s_navStatus;
   state->isNavigating = (s_navStatus == NAV_STATUS_RUNNING);
-  state->hasActiveTarget = s_hasActiveWaypoint;
+  state->hasActiveTarget = s_hasActiveWaypoint || s_heightControlActive;
   state->lastErrorCode = s_lastNavError;
+  state->heightControlActive = s_heightControlActive;
+  state->targetAltitude = s_heightTargetAltitude;
+  state->maxVerticalSpeed = s_heightMaxVerticalSpeed;
 
   if (s_hasActiveWaypoint) {
     state->currentTarget = s_currentWaypoint;
@@ -337,14 +430,75 @@ static void NavigationThreadFunc() {
 
   while (!s_stopThread) {
     E_NavigationStatus navStatus;
+    bool heightControlActive;
+    dji_f32_t heightTargetAltitude;
+    dji_f32_t heightMaxVerticalSpeed;
+    uint64_t loopGeneration;
     {
       std::lock_guard<std::mutex> lock(s_cmdMutex);
       navStatus = s_navStatus;
+      heightControlActive = s_heightControlActive;
+      heightTargetAltitude = s_heightTargetAltitude;
+      heightMaxVerticalSpeed = s_heightMaxVerticalSpeed;
+      loopGeneration = s_controlGeneration;
     }
 
     loopCounter++;
     if (navStatus != NAV_STATUS_RUNNING) {
       SleepMs(100);
+      continue;
+    }
+
+    if (heightControlActive) {
+      T_DroneStatus droneStatus = {};
+      T_DjiReturnCode statusReturnCode =
+          DataSubscriber_GetDroneStatus(&droneStatus);
+      if (statusReturnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        {
+          std::lock_guard<std::mutex> lock(s_cmdMutex);
+          s_lastNavError = statusReturnCode;
+        }
+        SleepMs(NAV_LOOP_INTERVAL_MS);
+        continue;
+      }
+
+      dji_f32_t altitudeError =
+          heightTargetAltitude - droneStatus.altitude;
+      if (std::abs(altitudeError) < ARRIVAL_THRESHOLD_Z_M) {
+        if (CompleteHeightControlIfCurrent(loopGeneration) ==
+            DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+          USER_LOG_INFO("Height target reached: %.2f m",
+                        heightTargetAltitude);
+        }
+        SleepMs(NAV_LOOP_INTERVAL_MS);
+        continue;
+      }
+
+      dji_f32_t verticalSpeed = altitudeError;
+      if (verticalSpeed > heightMaxVerticalSpeed) {
+        verticalSpeed = heightMaxVerticalSpeed;
+      } else if (verticalSpeed < -heightMaxVerticalSpeed) {
+        verticalSpeed = -heightMaxVerticalSpeed;
+      }
+
+      T_VelocityCommand heightCommand = {};
+      heightCommand.vx = 0.0f;
+      heightCommand.vy = 0.0f;
+      heightCommand.vz = verticalSpeed;
+      heightCommand.yawRate = 0.0f;
+
+      T_DjiReturnCode executeReturnCode =
+          SendNavigationVelocityIfCurrent(
+              &heightCommand, loopGeneration, true);
+      if (executeReturnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        std::lock_guard<std::mutex> lock(s_cmdMutex);
+        if (s_controlGeneration == loopGeneration &&
+            s_heightControlActive) {
+          s_lastNavError = executeReturnCode;
+        }
+      }
+
+      SleepMs(NAV_LOOP_INTERVAL_MS);
       continue;
     }
 
@@ -366,13 +520,15 @@ static void NavigationThreadFunc() {
         USER_LOG_INFO("开始飞往目标点 - 纬度: %f, 经度: %f, 高度: %f",
                       target.latitude, target.longitude, target.altitude);
       } else {
-        s_navStatus = NAV_STATUS_COMPLETED;
-        USER_LOG_INFO("所有航点已完成");
+        hasTarget = false;
       }
     }
 
     if (!hasTarget) {
-      CommandControl_Hover();
+      if (CompleteNavigationIfNoTargetCurrent(loopGeneration) ==
+          DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        USER_LOG_INFO("所有航点已完成");
+      }
       SleepMs(100);
       continue;
     }
@@ -447,7 +603,12 @@ static void NavigationThreadFunc() {
       USER_LOG_INFO("已到达航点");
 
       // Hover and Wait
-      CommandControl_Hover();
+      T_VelocityCommand hoverCommand = {};
+      if (SendNavigationVelocityIfCurrent(
+              &hoverCommand, loopGeneration, false) !=
+          DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        continue;
+      }
       if (target.stayTime > 0) {
         USER_LOG_INFO("悬停等待 %d 秒...", target.stayTime);
         if (s_osalHandler)
@@ -456,12 +617,19 @@ static void NavigationThreadFunc() {
           std::this_thread::sleep_for(std::chrono::seconds(target.stayTime));
       }
 
-      std::lock_guard<std::mutex> lock(s_cmdMutex);
-      s_hasActiveWaypoint = false;
-      memset(&s_currentWaypoint, 0, sizeof(s_currentWaypoint));
-      s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
-      if (s_waypointQueue.empty()) {
-        s_navStatus = NAV_STATUS_COMPLETED;
+      {
+        std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
+        std::lock_guard<std::mutex> lock(s_cmdMutex);
+        if (s_controlGeneration == loopGeneration &&
+            s_navStatus == NAV_STATUS_RUNNING &&
+            s_hasActiveWaypoint && !s_heightControlActive) {
+          s_hasActiveWaypoint = false;
+          memset(&s_currentWaypoint, 0, sizeof(s_currentWaypoint));
+          s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+          if (s_waypointQueue.empty()) {
+            s_navStatus = NAV_STATUS_COMPLETED;
+          }
+        }
       }
     } else {
       // Control Loop
@@ -504,27 +672,30 @@ static void NavigationThreadFunc() {
       cmd.vz = (float)vD;
       cmd.yawRate = (float)vYaw;
 
-      {
-        std::lock_guard<std::mutex> lock(s_cmdMutex);
-        if (s_navStatus != NAV_STATUS_RUNNING) {
-          USER_LOG_INFO("导航已停止，跳过速度指令发送");
-          continue;
-        }
-      }
-
-      T_DjiReturnCode execRet = CommandControl_ExecuteVelocityControl(&cmd);
+      T_DjiReturnCode execRet =
+          SendNavigationVelocityIfCurrent(
+              &cmd, loopGeneration, false);
       if (execRet != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         {
           std::lock_guard<std::mutex> lock(s_cmdMutex);
-          s_lastNavError = execRet;
+          if (s_controlGeneration == loopGeneration &&
+              s_hasActiveWaypoint) {
+            s_lastNavError = execRet;
+          }
         }
-        USER_LOG_ERROR("发送速度指令失败: 0x%08llX. 尝试重新获取控制权...",
-                       execRet);
-
-        DjiFlightController_ObtainJoystickCtrlAuthority();
+        if (execRet !=
+            DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE) {
+          USER_LOG_ERROR(
+              "发送速度指令失败: 0x%08llX. 尝试重新获取控制权...",
+              execRet);
+          DjiFlightController_ObtainJoystickCtrlAuthority();
+        }
       } else {
         std::lock_guard<std::mutex> lock(s_cmdMutex);
-        s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+        if (s_controlGeneration == loopGeneration &&
+            s_hasActiveWaypoint) {
+          s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+        }
       }
 
       SleepMs(NAV_LOOP_INTERVAL_MS);
@@ -538,4 +709,95 @@ static void SleepMs(uint32_t sleepMs) {
   } else {
     std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
   }
+}
+
+static T_DjiReturnCode
+SendNavigationVelocityIfCurrent(const T_VelocityCommand *cmd,
+                                uint64_t expectedGeneration,
+                                bool requireHeightControl) {
+  if (cmd == nullptr) {
+    return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
+  }
+
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
+  {
+    std::lock_guard<std::mutex> stateLock(s_cmdMutex);
+    bool expectedControlActive =
+        requireHeightControl
+            ? s_heightControlActive
+            : (!s_heightControlActive && s_hasActiveWaypoint);
+    if (s_controlGeneration != expectedGeneration ||
+        s_navStatus != NAV_STATUS_RUNNING ||
+        !expectedControlActive) {
+      return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE;
+    }
+  }
+
+  return ExecuteVelocityControlUnlocked(cmd);
+}
+
+static T_DjiReturnCode
+CompleteHeightControlIfCurrent(uint64_t expectedGeneration) {
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
+  {
+    std::lock_guard<std::mutex> stateLock(s_cmdMutex);
+    if (s_controlGeneration != expectedGeneration ||
+        s_navStatus != NAV_STATUS_RUNNING ||
+        !s_heightControlActive) {
+      return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE;
+    }
+
+    ClearHeightControlLocked();
+    s_navStatus = NAV_STATUS_COMPLETED;
+    s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+  }
+
+  T_VelocityCommand hoverCommand = {};
+  T_DjiReturnCode returnCode =
+      ExecuteVelocityControlUnlocked(&hoverCommand);
+  if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+    std::lock_guard<std::mutex> stateLock(s_cmdMutex);
+    if (s_controlGeneration == expectedGeneration &&
+        s_navStatus == NAV_STATUS_COMPLETED) {
+      s_navStatus = NAV_STATUS_ERROR;
+      s_lastNavError = returnCode;
+    }
+  }
+  return returnCode;
+}
+
+static T_DjiReturnCode
+CompleteNavigationIfNoTargetCurrent(uint64_t expectedGeneration) {
+  std::lock_guard<std::mutex> sendLock(s_joystickSendMutex);
+  {
+    std::lock_guard<std::mutex> stateLock(s_cmdMutex);
+    if (s_controlGeneration != expectedGeneration ||
+        s_navStatus != NAV_STATUS_RUNNING ||
+        s_heightControlActive || s_hasActiveWaypoint ||
+        !s_waypointQueue.empty()) {
+      return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE;
+    }
+
+    s_navStatus = NAV_STATUS_COMPLETED;
+    s_lastNavError = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+  }
+
+  T_VelocityCommand hoverCommand = {};
+  T_DjiReturnCode returnCode =
+      ExecuteVelocityControlUnlocked(&hoverCommand);
+  if (returnCode != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+    std::lock_guard<std::mutex> stateLock(s_cmdMutex);
+    if (s_controlGeneration == expectedGeneration &&
+        s_navStatus == NAV_STATUS_COMPLETED) {
+      s_navStatus = NAV_STATUS_ERROR;
+      s_lastNavError = returnCode;
+    }
+  }
+  return returnCode;
+}
+
+static void ClearHeightControlLocked() {
+  s_heightControlActive = false;
+  s_heightTargetAltitude = 0.0f;
+  s_heightMaxVerticalSpeed = DEFAULT_VERTICAL_SPEED_MPS;
 }

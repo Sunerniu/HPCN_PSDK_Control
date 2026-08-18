@@ -100,6 +100,13 @@ T_DjiReturnCode CommandControl_ReleaseJoystickAuthority(void);
 T_DjiReturnCode CommandControl_Takeoff(void);
 
 /**
+ * @brief 仅调整高度至目标绝对海拔，不主动改变水平位置和航向
+ * @param targetAltitude 目标绝对海拔 (米)
+ * @return 执行结果
+ */
+T_DjiReturnCode CommandControl_HeightTo(dji_f32_t targetAltitude);
+
+/**
  * @brief 降落
  * @return 执行结果
  */
@@ -176,12 +183,6 @@ T_DjiReturnCode CommandControl_StartNavigation(void);
 T_DjiReturnCode CommandControl_StopNavigation(void);
 
 /**
- * @brief 仅暂停导航状态，不额外发送悬停速度指令
- * @return 执行结果
- */
-T_DjiReturnCode CommandControl_StopNavigationOnly(void);
-
-/**
  * @brief 恢复导航
  * @return 执行结果
  */
@@ -207,6 +208,9 @@ typedef struct {
   uint8_t queueCount;       // 队列中的航点数量
   T_Waypoint
       queue[NAV_MAX_QUEUE_REPORT]; // 队列中的航点 (最多NAV_MAX_QUEUE_REPORT个)
+  bool heightControlActive;       // 是否正在执行仅高度控制
+  dji_f32_t targetAltitude;       // 仅高度控制目标绝对海拔
+  dji_f32_t maxVerticalSpeed;     // 仅高度控制最大垂直速度
 } T_NavState;
 
 /**

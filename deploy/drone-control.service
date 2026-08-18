@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=hpcn
 Group=hpcn
+EnvironmentFile=-/etc/default/drone-control
 WorkingDirectory=/home/hpcn/Desktop/PSDK/psdk-3.14.1-fc30/build/bin
 ExecStart=/home/hpcn/Desktop/PSDK/psdk-3.14.1-fc30/start_drone.sh
 Restart=always

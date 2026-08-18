@@ -8,6 +8,9 @@ cp "$PROJECT_DIR/deploy/start_drone.sh" "$PROJECT_DIR/start_drone.sh"
 chmod +x "$PROJECT_DIR/start_drone.sh"
 
 sudo cp "$PROJECT_DIR/deploy/$SERVICE_NAME" "/etc/systemd/system/$SERVICE_NAME"
+if [ ! -f /etc/default/drone-control ]; then
+    sudo cp "$PROJECT_DIR/deploy/drone-control.env" /etc/default/drone-control
+fi
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"

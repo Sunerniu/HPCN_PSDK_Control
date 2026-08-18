@@ -228,7 +228,7 @@ static void *ServerThreadEntry(void *arg) {
           USER_LOG_WARN(
               "TCP disconnect timeout (>%dms), sending navigation stop!",
               TCP_SERVER_DISCONNECT_TIMEOUT_MS);
-          CommandControl_StopNavigationOnly();
+          CommandControl_StopNavigation();
         }
         s_disconnectTimeoutTriggered = true;
       }
@@ -276,7 +276,7 @@ static void *ServerThreadEntry(void *arg) {
 
 static void HandleClientConnection(int clientSocket) {
   uint8_t buffer[PROTOCOL_PACKET_SIZE];
-  ssize_t bytesRead;
+  size_t bufferedBytes = 0;
 
   // Set receive timeout
   struct timeval tv;
@@ -285,19 +285,22 @@ static void HandleClientConnection(int clientSocket) {
   setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   while (s_isRunning && s_clientSocket >= 0) {
-    bytesRead = recv(clientSocket, buffer, PROTOCOL_PACKET_SIZE, 0);
+    ssize_t bytesRead =
+        recv(clientSocket, buffer + bufferedBytes,
+             PROTOCOL_PACKET_SIZE - bufferedBytes, 0);
 
-    if (bytesRead <= 0) {
-      if (bytesRead == 0) {
-        // Connection closed by client
-        break;
-      }
-      // Timeout or error, continue waiting
+    if (bytesRead == 0) {
+      // Connection closed by client
+      break;
+    }
+
+    if (bytesRead < 0) {
+      // Timeout or transient error: preserve a partial packet and keep waiting.
       continue;
     }
 
-    if (bytesRead != PROTOCOL_PACKET_SIZE) {
-      USER_LOG_WARN("TCP received incomplete packet: %zd bytes", bytesRead);
+    bufferedBytes += static_cast<size_t>(bytesRead);
+    if (bufferedBytes < PROTOCOL_PACKET_SIZE) {
       continue;
     }
 
@@ -306,6 +309,7 @@ static void HandleClientConnection(int clientSocket) {
     if (!Protocol_ValidatePacket(packet)) {
       USER_LOG_WARN("TCP received invalid packet (header: 0x%04X)",
                     packet->header);
+      bufferedBytes = 0;
       continue;
     }
 
@@ -319,6 +323,8 @@ static void HandleClientConnection(int clientSocket) {
         USER_LOG_WARN("Command handler returned error: %d", result);
       }
     }
+
+    bufferedBytes = 0;
   }
 }
 

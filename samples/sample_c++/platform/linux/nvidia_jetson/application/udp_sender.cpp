@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -212,7 +213,12 @@ T_DjiReturnCode UdpSender_SendLatestStatus(void) {
 bool UdpSender_IsInitialized(void) { return s_isInitialized; }
 
 T_DjiReturnCode UdpSender_InitDefault(void) {
-  return UdpSender_Init(UDP_DEFAULT_IP, UDP_DEFAULT_PORT);
+  const char *targetIp = std::getenv("UDP_TARGET_IP");
+  if (targetIp == NULL || targetIp[0] == '\0') {
+    targetIp = UDP_DEFAULT_IP;
+  }
+
+  return UdpSender_Init(targetIp, UDP_DEFAULT_PORT);
 }
 
 static void *StatusThreadEntry(void *arg) {

@@ -26,7 +26,7 @@
 /* Private constants -------------------------------------------------*/
 #define UDP_RECEIVER_THREAD_STACK_SIZE 2048
 #define UDP_HEARTBEAT_STOP_TIMEOUT_SEC 10
-#define UDP_HEARTBEAT_GOHOME_TIMEOUT_SEC 20
+#define UDP_HEARTBEAT_GOHOME_TIMEOUT_SEC 200
 
 /* Private variables -------------------------------------------------*/
 static int s_recvSocket = -1;
@@ -248,7 +248,7 @@ static void *ReceiverThreadEntry(void *arg) {
       if (missedHeartbeats >= UDP_HEARTBEAT_STOP_TIMEOUT_SEC && !hasStopped) {
         USER_LOG_ERROR("UDP heartbeat missing over %d seconds, triggering navigation stop",
                        UDP_HEARTBEAT_STOP_TIMEOUT_SEC);
-        CommandControl_StopNavigationOnly();
+        CommandControl_StopNavigation();
         hasStopped = true;
       }
       if (missedHeartbeats >= UDP_HEARTBEAT_GOHOME_TIMEOUT_SEC && !hasGoHome) {

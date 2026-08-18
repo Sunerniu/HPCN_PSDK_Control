@@ -30,7 +30,7 @@ extern "C" {
  */
 typedef enum {
   // 基础控制命令 0x01 - 0x0F
-  CMD_TAKEOFF = 0x01,       // 起飞
+  CMD_TAKEOFF = 0x01,       // 使用 DJI 默认起飞流程
   CMD_LAND = 0x02,          // 降落
   CMD_GOHOME = 0x03,        // 返航
   CMD_CANCEL_GOHOME = 0x04, // 取消返航
@@ -42,6 +42,7 @@ typedef enum {
   // 导航命令 0x10 - 0x1F
   CMD_PLANSTO = 0x13,   // 追加航点 (队列)
   CMD_CHANGESTO = 0x15, // 切换目标点 (丢弃原有目标)
+  CMD_HEIGHTTO = 0x17,  // 仅飞至指定绝对海拔，固定垂直速度 1.5m/s
 
   // 连续导航控制 0x20 - 0x2F
   CMD_NAV_START = 0x20,  // 启动或继续导航
@@ -142,6 +143,8 @@ static inline const char *Protocol_GetCommandName(uint8_t cmdType) {
     return "PLANSTO";
   case CMD_CHANGESTO:
     return "CHANGESTO";
+  case CMD_HEIGHTTO:
+    return "HEIGHTTO";
   case CMD_NAV_START:
     return "NAV_START";
   case CMD_NAV_STOP:

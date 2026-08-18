@@ -23,6 +23,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 /* Private variables ---------------------------------------------------------*/
@@ -38,12 +39,14 @@ static T_DjiReturnCode ExecuteNavigationInternal(E_CommandType cmdType,
                                                  E_CommandSource source);
 static bool ParseWaypointInput(const std::string &input, T_Waypoint *wp);
 static bool ValidateWaypoint(const T_Waypoint *wp, E_CommandSource source);
+static bool ParseAltitudeInput(const std::string &input, float *altitude);
+static bool ValidateAbsoluteAltitude(float altitude);
 
 /* Private constants ---------------------------------------------------------*/
 #define WAYPOINT_MAX_DISTANCE_M 2000.0 // 最大允许距离 (2000米)
-#define WAYPOINT_MAX_ALTITUDE_M 1500.0  // 最大允许高度 (500米)
-#define WAYPOINT_MIN_ALTITUDE_M 0.0    // 最小允许高度 (0米)
-#define EARTH_RADIUS_M 6371000.0       // 地球半径 (米)
+#define WAYPOINT_MAX_ALTITUDE_M 1500.0 // 最大允许绝对海拔 (1500米)
+#define WAYPOINT_MIN_ALTITUDE_M 0.0    // 最小允许绝对海拔 (0米)
+#define EARTH_RADIUS_M 6371000.0 // 地球半径 (米)
 
 /* Exported functions definition ---------------------------------------------*/
 
@@ -63,7 +66,9 @@ void ConsoleHandler_PrintHelp(void) {
   std::cout << "\n==================== 命令列表 ===================="
             << std::endl;
   std::cout << "【基础控制】" << std::endl;
-  std::cout << "  takeoff, t       - 起飞" << std::endl;
+  std::cout << "  takeoff, t       - 使用DJI默认高度起飞" << std::endl;
+  std::cout << "  heightto <绝对高度> - 保持水平位置和航向，仅调整高度"
+            << std::endl;
   std::cout << "  land, l          - 降落" << std::endl;
   std::cout << "  home             - 返航" << std::endl;
   std::cout << "  cancelhome       - 取消返航" << std::endl;
@@ -81,6 +86,7 @@ void ConsoleHandler_PrintHelp(void) {
   std::cout << "  clear            - 清空全部导航任务" << std::endl;
   std::cout << "" << std::endl;
   std::cout << "【系统】" << std::endl;
+  std::cout << "  status           - 打印无人机状态" << std::endl;
   std::cout << "  auth             - 获取控制权限" << std::endl;
   std::cout << "  gimbal_rotate <p> <r> <y> [t] - 旋转云台(角度/时间)" << std::endl;
   std::cout << "  gimbal_reset     - 复位云台" << std::endl;
@@ -143,7 +149,19 @@ void ConsoleHandler_RunLoop(void) {
 
   while (s_isRunning) {
     std::cout << "\n>>> ";
-    std::getline(std::cin, input);
+    if (!std::getline(std::cin, input)) {
+      T_DjiOsalHandler *osalHandler = DjiPlatform_GetOsalHandler();
+      USER_LOG_INFO(
+          "Console input unavailable; continuing in background service mode");
+      while (s_isRunning) {
+        if (osalHandler != NULL) {
+          osalHandler->TaskSleepMs(500);
+        } else {
+          usleep(500000);
+        }
+      }
+      return;
+    }
 
     if (input.empty())
       continue;
@@ -156,6 +174,20 @@ void ConsoleHandler_RunLoop(void) {
         std::cout << "[ERROR] 飞控不可用" << std::endl;
       } else {
         ConsoleHandler_ExecuteCommand(CMD_TAKEOFF, CMD_SOURCE_CONSOLE);
+      }
+    } else if (input.find("heightto ") == 0) {
+      float altitude = 0.0f;
+      if (!s_flightControlAvailable) {
+        std::cout << "[ERROR] 飞控不可用" << std::endl;
+      } else if (!ParseAltitudeInput(input.substr(9), &altitude) ||
+                 !ValidateAbsoluteAltitude(altitude)) {
+        std::cout << "[ERROR] 参数错误，用法: heightto <绝对高度>"
+                  << std::endl;
+      } else {
+        T_DjiReturnCode ret = CommandControl_HeightTo(altitude);
+        std::cout << "[CMD] 仅高度控制至绝对海拔 " << altitude
+                  << " m，返回码: 0x" << std::hex << ret << std::dec
+                  << std::endl;
       }
     } else if (input == "land" || input == "l") {
       if (!s_flightControlAvailable) {
@@ -273,7 +305,7 @@ static T_DjiReturnCode ExecuteCommandInternal(E_CommandType cmdType,
 
   case CMD_HOVER:
     std::cout << "[" << srcStr << "] 执行悬停" << std::endl;
-    ret = CommandControl_Hover();
+    ret = CommandControl_ClearNavigation();
     break;
 
   case CMD_CONFIRM_LAND:
@@ -359,7 +391,19 @@ static T_DjiReturnCode ExecuteNavigationInternal(E_CommandType cmdType,
     }
     break;
 
+  case CMD_HEIGHTTO:
+    if (wp && ValidateAbsoluteAltitude(wp->altitude)) {
+      std::cout << "[" << srcStr << "] 仅高度控制: 绝对海拔 "
+                << wp->altitude << " m, 固定垂直速度 1.5 m/s"
+                << std::endl;
+      ret = CommandControl_HeightTo(wp->altitude);
+    } else {
+      ret = DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
+    }
+    break;
+
   case CMD_NAV_STOP:
+  case CMD_NAV_PAUSE:
     std::cout << "[" << srcStr << "] 暂停导航" << std::endl;
     ret = CommandControl_StopNavigation();
     break;
@@ -417,6 +461,40 @@ static bool ParseWaypointInput(const std::string &input, T_Waypoint *wp) {
     return true;
   }
   return false;
+}
+
+static bool ParseAltitudeInput(const std::string &input, float *altitude) {
+  if (altitude == NULL) {
+    return false;
+  }
+
+  std::stringstream ss(input);
+  float parsedAltitude = 0.0f;
+
+  if (!(ss >> parsedAltitude)) {
+    return false;
+  }
+
+  ss >> std::ws;
+  if (!ss.eof()) {
+    return false;
+  }
+
+  *altitude = parsedAltitude;
+  return true;
+}
+
+static bool ValidateAbsoluteAltitude(float altitude) {
+  if (!std::isfinite(altitude) ||
+      altitude < WAYPOINT_MIN_ALTITUDE_M ||
+      altitude > WAYPOINT_MAX_ALTITUDE_M) {
+    USER_LOG_WARN("Absolute altitude %.2f out of range [%.1f, %.1f]",
+                  altitude, WAYPOINT_MIN_ALTITUDE_M,
+                  WAYPOINT_MAX_ALTITUDE_M);
+    return false;
+  }
+
+  return true;
 }
 
 static const char *GetSourceString(E_CommandSource source) {
