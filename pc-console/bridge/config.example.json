@@ -1,0 +1,11 @@
+{
+  "agxHost": "10.29.174.183",
+  "tcpPort": 8080,
+  "commandUdpPort": 14551,
+  "telemetryPort": 14550,
+  "rtspPort": 8554,
+  "rtspPath": "/m350/fpv",
+  "transport": "udp",
+  "heartbeatEnabled": true,
+  "autoVideo": true
+}

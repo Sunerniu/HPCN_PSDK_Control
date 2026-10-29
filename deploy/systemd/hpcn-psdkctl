@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="hpcn-psdk.service"
+CONFIG_FILE="/etc/hpcn-psdk/hpcn-psdk.env"
+
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Please run this command with sudo." >&2
+    exit 1
+  fi
+}
+
+require_config() {
+  if [ ! -f "${CONFIG_FILE}" ]; then
+    echo "Configuration not found: ${CONFIG_FILE}" >&2
+    echo "Install the service first." >&2
+    exit 1
+  fi
+}
+
+validate_ipv4() {
+  local address="$1"
+  local first second third fourth extra
+
+  IFS=. read -r first second third fourth extra <<<"${address}"
+  if [ -n "${extra:-}" ] || [ -z "${first:-}" ] || [ -z "${second:-}" ] ||
+     [ -z "${third:-}" ] || [ -z "${fourth:-}" ]; then
+    return 1
+  fi
+
+  for part in "${first}" "${second}" "${third}" "${fourth}"; do
+    case "${part}" in
+      *[!0-9]*)
+        return 1
+        ;;
+    esac
+    if [ "${part}" -lt 0 ] || [ "${part}" -gt 255 ]; then
+      return 1
+    fi
+  done
+}
+
+set_config_value() {
+  local key="$1"
+  local value="$2"
+
+  if grep -q "^${key}=" "${CONFIG_FILE}"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "${CONFIG_FILE}"
+  else
+    printf '%s=%s\n' "${key}" "${value}" >>"${CONFIG_FILE}"
+  fi
+}
+
+restart_service() {
+  systemctl restart "${SERVICE_NAME}"
+  systemctl --no-pager --full status "${SERVICE_NAME}"
+}
+
+show_usage() {
+  cat <<'EOF'
+Usage:
+  sudo hpcn-psdkctl set-ip <IPv4>       Set fixed UDP status receiver IP
+  sudo hpcn-psdkctl precise on           Enable precise positioning and time
+  sudo hpcn-psdkctl precise off          Disable precise positioning
+  sudo hpcn-psdkctl show                 Show current configuration
+  sudo hpcn-psdkctl status               Show service status
+  sudo hpcn-psdkctl logs                 Follow live service logs
+  sudo hpcn-psdkctl start|stop|restart   Control the running service
+  sudo hpcn-psdkctl enable|disable       Enable/disable startup at boot
+EOF
+}
+
+command_name="${1:-}"
+
+case "${command_name}" in
+  set-ip)
+    require_root
+    require_config
+    target_ip="${2:-}"
+    if ! validate_ipv4 "${target_ip}"; then
+      echo "Invalid IPv4 address: ${target_ip}" >&2
+      exit 1
+    fi
+    set_config_value "UDP_TARGET_IP" "${target_ip}"
+    echo "UDP status receiver fixed at ${target_ip}:14550"
+    restart_service
+    ;;
+  precise)
+    require_root
+    require_config
+    case "${2:-}" in
+      on)
+        set_config_value "ENABLE_PRECISE_POSITIONING" "1"
+        echo "Precise positioning enabled."
+        ;;
+      off)
+        set_config_value "ENABLE_PRECISE_POSITIONING" "0"
+        echo "Precise positioning disabled."
+        ;;
+      *)
+        echo "Usage: sudo hpcn-psdkctl precise on|off" >&2
+        exit 1
+        ;;
+    esac
+    restart_service
+    ;;
+  show)
+    require_config
+    grep -E '^(PPS_GPIOCHIP|PPS_GPIO_LINE|DJI_UART0_DEVICE|DJI_UART1_ENABLE|DJI_UART1_DEVICE|AIRCRAFT_TIME_UTC_OFFSET_MINUTES|UDP_TARGET_IP|ENABLE_PRECISE_POSITIONING)=' \
+      "${CONFIG_FILE}"
+    ;;
+  status)
+    systemctl --no-pager --full status "${SERVICE_NAME}"
+    ;;
+  logs)
+    journalctl -u "${SERVICE_NAME}" -f
+    ;;
+  start|stop|restart)
+    require_root
+    systemctl "${command_name}" "${SERVICE_NAME}"
+    systemctl --no-pager --full status "${SERVICE_NAME}" || true
+    ;;
+  enable)
+    require_root
+    systemctl enable --now "${SERVICE_NAME}"
+    systemctl --no-pager --full status "${SERVICE_NAME}"
+    ;;
+  disable)
+    require_root
+    systemctl disable --now "${SERVICE_NAME}"
+    ;;
+  *)
+    show_usage
+    exit 1
+    ;;
+esac

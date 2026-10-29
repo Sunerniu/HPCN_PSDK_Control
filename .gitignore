@@ -1,0 +1,23 @@
+build/
+build-*/
+Logs/
+**/__pycache__/
+*.pyc
+*.pyo
+*.log
+*.h264
+.DS_Store
+
+.vs/
+.vscode/
+.idea/
+
+*.user
+*.suo
+*.tmp
+
+# Local agent/editor metadata
+**/.codex
+
+# DJI application credentials. Copy the adjacent .example file locally.
+**/dji_sdk_app_info.local.h

@@ -1,0 +1,13 @@
+#ifndef DJI_SDK_APP_INFO_LOCAL_H
+#define DJI_SDK_APP_INFO_LOCAL_H
+
+// Copy this file to dji_sdk_app_info.local.h and replace every placeholder
+// with the values from the DJI Developer portal. Never commit the local file.
+#define USER_APP_NAME               "REPLACE_ME"
+#define USER_APP_ID                 "REPLACE_ME"
+#define USER_APP_KEY                "REPLACE_ME"
+#define USER_APP_LICENSE            "REPLACE_ME"
+#define USER_DEVELOPER_ACCOUNT      "REPLACE_ME"
+#define USER_BAUD_RATE              "460800"
+
+#endif // DJI_SDK_APP_INFO_LOCAL_H

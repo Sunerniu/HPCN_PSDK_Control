@@ -1,0 +1,31 @@
+[Unit]
+Description=HPCN DJI Payload SDK Control
+Wants=network-online.target
+After=network-online.target dev-ttyTHS0.device
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/hpcn-psdk
+EnvironmentFile=/etc/hpcn-psdk/hpcn-psdk.env
+ExecStartPre=/bin/sleep 20
+ExecStartPre=/usr/bin/test -c /dev/ttyTHS0
+ExecStartPre=/usr/bin/test -c /dev/gpiochip0
+ExecStartPre=/opt/hpcn-psdk/wait-usb-bulk.sh
+ExecStart=/opt/hpcn-psdk/dji_sdk_demo_on_jetson_cxx
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGTERM
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+LimitRTPRIO=80
+PrivateDevices=no
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target
